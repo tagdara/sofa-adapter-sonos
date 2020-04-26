@@ -114,7 +114,12 @@ class sonos(sofabase):
                 coordinator=self.adapter.getCoordinator(self.device)
                 # Images for services like soundcloud do not seem to use the album_art_uri - they populate it with a link that will
                 # generate a 404.  In these cases you must get the data from avtransport/enqueued_transport_uri_meta_data
-
+                try:
+                    if coordinator['AVTransport']['av_transport_uri_meta_data']['item_id']=='lineinput':
+                        return ''
+                except:
+                    pass
+                
                 if 'creator' in coordinator['AVTransport']['current_track_meta_data']:
                     return coordinator['AVTransport']['current_track_meta_data']['creator']
                 if 'artist' in coordinator['AVTransport']['current_track_meta_data']:
@@ -129,6 +134,12 @@ class sonos(sofabase):
         def title(self):
             try:
                 coordinator=self.adapter.getCoordinator(self.device)
+                try:
+                    if coordinator['AVTransport']['av_transport_uri_meta_data']['item_id']=='lineinput':
+                        return 'Line-In'
+                except:
+                    pass
+                
                 if coordinator['AVTransport']['current_track_meta_data']['title']:
                     return re.sub("[\(\[].*?[\)\]]", "",coordinator['AVTransport']['current_track_meta_data']['title'])
                 if 'enqueued_transport_uri_meta_data' in coordinator['AVTransport'] and 'title' in coordinator['AVTransport']['enqueued_transport_uri_meta_data']:
@@ -141,6 +152,12 @@ class sonos(sofabase):
         def album(self):
             try:
                 coordinator=self.adapter.getCoordinator(self.device)
+                try:
+                    if coordinator['AVTransport']['av_transport_uri_meta_data']['item_id']=='lineinput':
+                        return ''
+                except:
+                    pass
+                
                 return coordinator['AVTransport']['current_track_meta_data']['album']
             except:
                 return ""
@@ -150,6 +167,13 @@ class sonos(sofabase):
 
             coordinator=self.adapter.getCoordinator(self.device)
             try:
+                if coordinator['AVTransport']['av_transport_uri_meta_data']['item_id']=='lineinput':
+                    return "/image/sonos/logo"
+            except:
+                pass
+                
+
+            try:
                 # Images for services like soundcloud do not seem to use the album_art_uri - they populate it with a link that will
                 # generate a 404.  In these cases you must get the data from avtransport/enqueued_transport_uri_meta_data
                 if 'enqueued_transport_uri_meta_data' in coordinator['AVTransport'] and 'album_art_uri' in coordinator['AVTransport']['enqueued_transport_uri_meta_data']:
@@ -157,9 +181,9 @@ class sonos(sofabase):
                         return "/image/sonos/player/%s/AVTransport/enqueued_transport_uri_meta_data/album_art_uri" % (coordinator['speaker']['uid'])
                 if 'album' in coordinator['AVTransport']['current_track_meta_data']:
                     if 'album_art_uri' in coordinator['AVTransport']['current_track_meta_data']:
-                        return "/image/sonos/player/%s/AVTransport/current_track_meta_data/album_art_uri?%s" % (coordinator['speaker']['uid'], coordinator['AVTransport']['current_track_meta_data']['album'])
+                        return "/image/sonos/player/%s/AVTransport/current_track_meta_data/album_art_uri?album=%s" % (coordinator['speaker']['uid'], coordinator['AVTransport']['current_track_meta_data']['album'])
                     if 'album_art' in coordinator['AVTransport']['current_track_meta_data']:
-                        return "/image/sonos/player/%s/AVTransport/current_track_meta_data/album_art" % (coordinator['speaker']['uid'])
+                        return "/image/sonos/player/%s/AVTransport/current_track_meta_data/album_art?album=%s" % (coordinator['speaker']['uid'], coordinator['AVTransport']['current_track_meta_data']['album'])
                 return "/image/sonos/logo"
             except:
                 return "/image/sonos/logo"
@@ -168,6 +192,12 @@ class sonos(sofabase):
         def url(self):
             try:
                 coordinator=self.adapter.getCoordinator(self.device)
+                try:
+                    if coordinator['AVTransport']['av_transport_uri_meta_data']['item_id']=='lineinput':
+                        return "lineinput"
+                except:
+                    pass
+
                 return coordinator['AVTransport']['enqueued_transport_uri']
             except:
                 return ""
@@ -237,6 +267,7 @@ class sonos(sofabase):
         async def Stop(self, correlationToken=''):
             try:
                 player=await self.adapter.getPlayerOrCoordinator(self.device)
+                self.log.info('.. Preparing to send stop to %s with available actions %s' % (self.device, self.adapter.getPlayerActions(player)))
                 if 'Stop' in await self.adapter.getPlayerActions(player):
                     player.stop()
                 return self.device.Response(correlationToken)
@@ -308,6 +339,7 @@ class sonos(sofabase):
             self.polltime=.1
             self.subscriptions=[]
             self.artcache={}
+            self.artqueue=[]
             self.connect_needed=True
             if not loop:
                 self.loop = asyncio.new_event_loop()
@@ -482,7 +514,7 @@ class sonos(sofabase):
                 if self.connect_needed:
                     await self.startSonosConnection()
                 try:
-                    for device in self.subscriptions:
+                    for device in list(self.subscriptions):
                         if device.is_subscribed:
                             if not device.events.empty():
                                 x=device.events.get(timeout=0.2)
@@ -490,15 +522,22 @@ class sonos(sofabase):
                                 if device.service.service_id=='AVTransport':
                                     # apparently the AVtransport update does not work for radio station data but get_current_track_info will
                                     current_info=device.service.soco.get_current_track_info()
-                                    self.log.info('update: %s' % update)
-                                    self.log.info('gcti: %s' % current_info)
+                                    #self.log.info('update: %s' % update)
+                                    #self.log.info('gcti: %s' % current_info)
                                     del current_info['metadata']
                                     #self.log.info('UPDATE: %s %s' % (isinstance(update['current_track_meta_data'], str), update))
-                                    if update:
+                                    if update and 'current_track_meta_data' in update:
                                         if isinstance(update['current_track_meta_data'], str):
                                             update['current_track_meta_data']=dict()
                                         for item in current_info:
                                             update['current_track_meta_data'][item]=current_info[item]
+                                    try:
+                                        path='player/%s/AVTransport/current_track_meta_data/album_art_uri' % device.service.soco.uid
+                                        await self.getArt(path, update['current_track_meta_data']['album'], update['current_track_meta_data']['album_art_uri'], self.getPlayerByUID(device.service.soco.uid).ip_address)
+                                    except:
+                                        pass
+                                        #self.log.info('no art in %s' % update, exc_info=True)
+
                                     
                                 if device.service.service_id=='ZoneGroupTopology':
                                     # just do them all and see what's really updated
@@ -512,6 +551,7 @@ class sonos(sofabase):
 
                         else:
                             self.log.info("Subscription ended: %s" % device.__dict__)
+                            self.subscriptions.remove(device)
                     #time.sleep(self.polltime)
                     await asyncio.sleep(self.polltime)
                 except:
@@ -691,6 +731,17 @@ class sonos(sofabase):
             except:
                 self.log.error('Error getting player', exc_info=True)
                 return None
+
+        def getPlayerByUID(self, uid): 
+            try:
+                for player in self.players:
+                    if player.uid==uid:
+                        return player
+                return None
+            except:
+                self.log.error('Error getting player', exc_info=True)
+                return None
+  
         
 
         async def getPlayerOrCoordinator(self, device, direct=False):
@@ -760,12 +811,43 @@ class sonos(sofabase):
             except:
                 self.log.error('Couldnt get art for %s' % playerObject, exc_info=True)
                 #return {'name':playerObject['name'], 'id':playerObject['speaker']['uid'], 'image':""}
+
+        async def getArt(self, path, album, url="", ip=""):
+            try:
+                if path in self.artcache and self.artcache[path]['album']==album:
+                    return self.artcache[path]['image']
+                    
+                if url.find('http')==0:
+                    pass
+                elif ip:
+                    if url.find('/')==0:
+                        url='http://'+ip+':1400'+url                    
+                    else:
+                        url='http://'+ip+':1400/getaa?s=1&u='+url
+                else:
+                    return self.sonoslogo
+
+                timeout = aiohttp.ClientTimeout(total=10)
+                async with aiohttp.ClientSession(timeout=timeout) as client:
+                    self.log.info('.. downloading and caching album art: %s' % url)
+                    async with client.get(url, timeout=10) as response:
+                        result=await response.read()
+                        if result:
+                            self.artcache[path]={'url':url, 'album': album, 'image':result}
+                            #self.log.info('Replaced artcache %s' % url)
+                            return result            
+            except concurrent.futures._base.CancelledError:
+                self.log.error('.. Attempt to get art from sonos device cancelled for %s ' % (path))
+                    #self.connect_needed=True               
+            except:
+                self.log.error('Couldnt get art for %s' % path, exc_info=True)
+                #return {'name':playerObject['name'], 'id':playerObject['speaker']['uid'], 'image':""}
                 
+            return self.sonoslogo
 
         async def virtualImage(self, path, client=None):
             
             try:
-
                 if path=='darklogo':
                     return self.darklogo
 
@@ -777,26 +859,9 @@ class sonos(sofabase):
                     
                 playerObject=self.dataset.getObjectFromPath(self.dataset.getObjectPath("/"+path))
                 url=self.dataset.getObjectFromPath("/"+path)
-                #self.log.info('VI: %s %s %s' % (path, url, playerObject))
 
-                if url.find('http')==0:
-                    pass
-                elif url.find('/')==0:
-                    url='http://'+playerObject['ip_address']+':1400'+url                    
-                else:
-                    url='http://'+playerObject['ip_address']+':1400/getaa?s=1&u='+url
                 if path in self.artcache:
-                    if self.artcache[path]['url']==url:
-                        return self.artcache[path]['image']
-
-                async with aiohttp.ClientSession() as client:
-                    async with client.get(url) as response:
-                        result=await response.read()
-                        if result:
-                            self.artcache[path]={'url':url, 'image':result}
-                            return result
-                        else:
-                            return self.sonoslogo
+                    return self.artcache[path]['image']
 
             except concurrent.futures._base.CancelledError:
                 self.log.error('Attempt to get art cancelled for %s %s' % (path,url))
