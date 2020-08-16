@@ -5,8 +5,7 @@ import sys, os
 sys.path.append(os.path.dirname(__file__))
 sys.path.append(os.path.join(os.path.dirname(__file__),'../../base'))
 
-from sofabase import sofabase
-from sofabase import adapterbase
+from sofabase import sofabase, adapterbase, configbase
 import devices
 
 
@@ -28,13 +27,20 @@ import logging
 
 import soco
 import soco.music_library
+import soco.exceptions
 from soco.events import event_listener
 from operator import itemgetter
 import concurrent.futures
 
 
 class sonos(sofabase):
+    
+    class adapter_config(configbase):
+    
+        def adapter_fields(self):
+            self.players=self.set_or_default('players', default=[])
 
+  
     class EndpointHealth(devices.EndpointHealth):
 
         @property            
@@ -45,27 +51,24 @@ class sonos(sofabase):
 
         @property            
         def input(self):
-            player=self.adapter.getPlayer(self.device)
-            #return "sonos:player:%s" % player.group.coordinator.uid
-            return player.group.coordinator.player_name
+            try:
+                player=self.adapter.getPlayer(self.device)
+                #return "sonos:player:%s" % player.group.coordinator.uid
+                return player.group.coordinator.player_name
+            except:
+                self.log.error('!! error getting input (coordinator) for %s' % self.device, exc_info=True)
+            return ""
 
         async def SelectInput(self, payload, correlationToken=''):
             try:
                 player=self.adapter.getPlayer(self.device)
                 coordinator=player.group.coordinator
-                if coordinator.uid!=player.uid:
-                    self.log.info('..Probably need to update coordinator we are leaving: %s' % coordinator.uid )
-                #player=await self.adapter.getPlayerOrCoordinator(self.device, direct=True)
-                #coordinator=self.adapter.getCoordinator(self.nativeObject)
-                #if coordinator['speaker']['uid']!=player.uid:
-                #    self.log.info('..Probably need to update coordinator we are leaving: %s' % coordinator['speaker']['uid'] )
-
-                self.log.info('Changing input for %s/%s: %s' % (player.player_name, player.uid, payload['input']))
+                self.log.debug('.. Changing input for %s/%s from %s to %s' % (player.player_name, player.uid, player.group.coordinator.player_name, payload['input']))
                 if payload['input']=='' or payload['input']==player.player_name:
                     player.unjoin()
                 else:
                     for otherplayer in self.adapter.players:
-                        if otherplayer.player_name==payload['input'] and otherplayer.is_visible:
+                        if (payload['input'].endswith(otherplayer.uid) or otherplayer.player_name==payload['input']) and otherplayer.is_visible:
                             player.join(otherplayer)
                             break
 
@@ -105,6 +108,35 @@ class sonos(sofabase):
                 self.log.error('!! Error during SetVolume', exc_info=True)
                 self.adapter.connect_needed=True
                 return None
+                
+    class FavoriteController(devices.ModeController):
+
+        @property            
+        def mode(self):
+            try:
+                for fav in self._supportedModes:
+                    if self._supportedModes[fav]==self.nativeObject['AVTransport']['enqueued_transport_uri']:
+                        return "%s.%s" % (self.name, fav)
+            except:
+                self.log.error('!! error getting surround mode', exc_info=True)
+                return ""
+
+        async def SetMode(self, payload, correlationToken=''):
+            try:
+                fv=""
+                fav=self._supportedModes[payload['mode'].split('.',1)[1]] # Yamaha modes have spaces, so set based on display name
+                for ndfav in self.adapter.dataset.nativeDevices['favorite']:
+                    if ndfav['uri']==fav:
+                        fv=ndfav['item_id']
+                        break
+                player=await self.adapter.getPlayerOrCoordinator(self.device)
+                if 'Play' in await self.adapter.getPlayerActions(player):
+                    self.log.info('.. play favorite %s' % fv)
+                    player.play_uri(uri=fv)
+
+            except:
+                self.adapter.log.error('Error setting mode status %s / %s / %s' % (payload, fav, fv), exc_info=True)
+            return {}
 
     class MusicController(devices.MusicController):
 
@@ -119,6 +151,13 @@ class sonos(sofabase):
                         return ''
                 except:
                     pass
+
+                try:
+                    if coordinator['AVTransport']['av_transport_uri_meta_data']['title'].startswith('AirPlay Device:'):
+                        return ''
+                except:
+                    pass
+
                 
                 if 'creator' in coordinator['AVTransport']['current_track_meta_data']:
                     return coordinator['AVTransport']['current_track_meta_data']['creator']
@@ -139,6 +178,17 @@ class sonos(sofabase):
                         return 'Line-In'
                 except:
                     pass
+
+
+                # CHEESE 6/13 - Sonos has clearly made some changes to the way they are handling lineinput in their data reporting
+                # and the above process no longer works. Now the line-in seems to get labeled "AirPlay Device: (device name)"
+                try:
+                    if coordinator['AVTransport']['av_transport_uri_meta_data']['title'].startswith('AirPlay Device:'):
+                        return 'Line-In'
+                except:
+                    pass
+
+
                 
                 if coordinator['AVTransport']['current_track_meta_data']['title']:
                     return re.sub("[\(\[].*?[\)\]]", "",coordinator['AVTransport']['current_track_meta_data']['title'])
@@ -158,6 +208,14 @@ class sonos(sofabase):
                 except:
                     pass
                 
+                try:
+                    if coordinator['AVTransport']['av_transport_uri_meta_data']['title'].startswith('AirPlay Device:'):
+                        return ''
+                except:
+                    pass
+
+
+                
                 return coordinator['AVTransport']['current_track_meta_data']['album']
             except:
                 return ""
@@ -168,6 +226,12 @@ class sonos(sofabase):
             coordinator=self.adapter.getCoordinator(self.device)
             try:
                 if coordinator['AVTransport']['av_transport_uri_meta_data']['item_id']=='lineinput':
+                    return "/image/sonos/logo"
+            except:
+                pass
+                
+            try:
+                if coordinator['AVTransport']['av_transport_uri_meta_data']['title'].startswith('AirPlay Device:'):
                     return "/image/sonos/logo"
             except:
                 pass
@@ -194,6 +258,12 @@ class sonos(sofabase):
                 coordinator=self.adapter.getCoordinator(self.device)
                 try:
                     if coordinator['AVTransport']['av_transport_uri_meta_data']['item_id']=='lineinput':
+                        return "lineinput"
+                except:
+                    pass
+
+                try:
+                    if coordinator['AVTransport']['av_transport_uri_meta_data']['title'].startswith('AirPlay Device:'):
                         return "lineinput"
                 except:
                     pass
@@ -233,11 +303,11 @@ class sonos(sofabase):
                 if 'Play' in await self.adapter.getPlayerActions(player):
                     player.play()
                 return self.device.Response(correlationToken)
-
             except:
                 self.log.error('!! Error during Play', exc_info=True)
-                self.adapter.connect_needed=True
-                return None
+            self.adapter.connect_needed=True
+            return self.device.ErrorResponse(correlationToken)
+
 
         async def PlayFavorite(self, payload, correlationToken=''):
             try:
@@ -248,9 +318,8 @@ class sonos(sofabase):
 
             except:
                 self.log.error('!! Error during Play', exc_info=True)
-                self.adapter.connect_needed=True
-                return None
-
+            self.adapter.connect_needed=True
+            return self.device.ErrorResponse(correlationToken)
 
         async def Pause(self, correlationToken=''):
             try:
@@ -258,24 +327,26 @@ class sonos(sofabase):
                 if 'Pause' in await self.adapter.getPlayerActions(player):
                     player.pause()
                 return self.device.Response(correlationToken)
-
+            except soco.exceptions.SoCoUPnPException:
+                self.log.warning('!! Error during Pause (Soco UPNP Exception - Transition not available)')
             except:
                 self.log.error('!! Error during Pause', exc_info=True)
-                self.adapter.connect_needed=True
-                return None
+            self.adapter.connect_needed=True
+            return self.device.ErrorResponse(correlationToken, error_type="NOT_SUPPORTED_IN_CURRENT_MODE", error_message="Transition not available")
                 
         async def Stop(self, correlationToken=''):
             try:
                 player=await self.adapter.getPlayerOrCoordinator(self.device)
-                self.log.info('.. Preparing to send stop to %s with available actions %s' % (self.device, self.adapter.getPlayerActions(player)))
+                #self.log.debug('.. Preparing to send stop to %s with available actions %s' % (self.device, self.adapter.getPlayerActions(player)))
                 if 'Stop' in await self.adapter.getPlayerActions(player):
                     player.stop()
                 return self.device.Response(correlationToken)
-
+            except soco.exceptions.SoCoUPnPException:
+                self.log.warning('!! Error during Stop (Soco UPNP Exception - Transition not available)')
             except:
                 self.log.error('!! Error during Stop', exc_info=True)
-                self.adapter.connect_needed=True
-                return None
+            self.adapter.connect_needed=True
+            return self.device.ErrorResponse(correlationToken, error_type="NOT_SUPPORTED_IN_CURRENT_MODE", error_message="Transition not available")
                 
         async def Skip(self, correlationToken=''):
             try:
@@ -283,11 +354,12 @@ class sonos(sofabase):
                 if 'Next' in await self.adapter.getPlayerActions(player):
                     player.next()
                 return self.device.Response(correlationToken)
-
+            except soco.exceptions.SoCoUPnPException:
+                self.log.warning('!! Error during Skip (Soco UPNP Exception - Transition not available)')
             except:
                 self.log.error('!! Error during Skip', exc_info=True)
-                self.adapter.connect_needed=True
-                return None
+            self.adapter.connect_needed=True
+            return self.device.ErrorResponse(correlationToken, error_type="NOT_SUPPORTED_IN_CURRENT_MODE", error_message="Transition not available")
                 
         async def Previous(self, correlationToken=''):
             try:
@@ -295,10 +367,12 @@ class sonos(sofabase):
                 if 'Previous' in await self.adapter.getPlayerActions(player):
                     player.previous()
                 return self.device.Response(correlationToken)
+            except soco.exceptions.SoCoUPnPException:
+                self.log.warning('!! Error during Previous (Soco UPNP Exception - Transition not available)')
             except:
-                self.log.error('!! Error during Skip', exc_info=True)
-                self.adapter.connect_needed=True
-                return None
+                self.log.error('!! Error during Previous', exc_info=True)
+            self.adapter.connect_needed=True
+            return self.device.ErrorResponse(correlationToken, error_type="NOT_SUPPORTED_IN_CURRENT_MODE", error_message="Transition not available")
 
         async def SelectInput(self, payload, correlationToken=''):
             try:
@@ -315,10 +389,8 @@ class sonos(sofabase):
                 return self.device.Response(correlationToken)
             except:
                 self.log.error('!! Error during SelectInput', exc_info=True)
-                self.adapter.connect_needed=True
-                return None
-
-
+            self.adapter.connect_needed=True
+            return self.device.ErrorResponse(correlationToken)
 
 
     class adapterProcess(adapterbase):
@@ -330,9 +402,11 @@ class sonos(sofabase):
                     logging.getLogger(lg).setLevel(level)
               
         
-        def __init__(self, log=None, loop=None, dataset=None, notify=None, request=None, **kwargs):
+        def __init__(self, log=None, loop=None, dataset=None, notify=None, request=None, config=None, **kwargs):
+            self.config=config
             self.dataset=dataset
             self.dataset.nativeDevices['player']={}
+            self.dataset.nativeDevices['favorite']={}
             self.log=log
             self.setSocoLoggers(logging.DEBUG)
             self.notify=notify
@@ -376,30 +450,41 @@ class sonos(sofabase):
                 self.players=await self.sonosDiscovery()
                 if self.players:
                     for player in self.players:
-                        try:
-                            if player.is_visible:
-                                for subService in ['avTransport','deviceProperties','renderingControl','zoneGroupTopology']:
-                                    try:
-                                        newsub=self.subscribeSonos(player,subService)
-                                        if newsub:
-                                            self.log.info('++ sonos state subscription: %s/%s' % (player.player_name, newsub.service.service_type))
-                                            self.subscriptions.append(newsub)
-                                        else:
-                                            break
-                                    except:
-                                        self.log.error('!! Error subscripting to sonos state: %s/%s' % (player.player_name, subService))
-                                        break
-                        except requests.exceptions.ConnectionError:
-                            self.log.error('!! Error connecting to player: %s' % player)
-                    self.sonosGetSonosFavorites(self.players[0])
+                        await self.subscribe_player(player)
+                    await self.sonosGetSonosFavorites(self.players[0])
                     self.connect_needed=False
             except:
                 self.log.error('Error starting sonos connections',exc_info=True)
+
+            
+        async def subscribe_player(self, player):
+
+            try:
+                result=True
+                if player.is_visible:
+                    for subService in ['avTransport','deviceProperties','renderingControl','zoneGroupTopology']:
+                        try:
+                            newsub=self.subscribeSonos(player,subService)
+                            if newsub:
+                                self.log.info('++ sonos state subscription: %s/%s' % (player.player_name, newsub.service.service_type))
+                                self.subscriptions.append(newsub)
+                            else:
+                                result=False
+                                break
+                        except:
+                            result=False
+                            self.log.error('!! Error subscripting to sonos state: %s/%s' % (player.player_name, subService))
+                            break
+            except requests.exceptions.ConnectionError:
+                self.log.error('!! Error connecting to player: %s' % player)
+                result=False
+                
+            return result
             
 
         def sonosQuery(self, resmd="", uri=""):
         
-            player=self.dataset.config['player_ip']
+            player=self.config.players[0]
             parentsource="MediaRenderer/"
             source="AVTransport"
             command="SetAVTransportURI"
@@ -426,26 +511,25 @@ class sonos(sofabase):
                 discovered=soco.discover()
                 if discovered:
                     discoverlist=list(discovered)
-                    self.log.info('Players: %s' % discoverlist)
+                    self.log.info('.. sonos players: %s' % discoverlist)
                 else:
                     discoverlist=None
                     
                 if discoverlist==None:
-                    if 'players' in self.dataset.config:
-                        discoverlist=[]
-                        for playername in self.dataset.config['players']:
+                    discoverlist=[]
+                    for playername in self.config.players:
+                        try:
+                            player=soco.SoCo(playername)
                             try:
-                                player=soco.SoCo(playername)
-                                try:
-                                    spinfo=player.get_speaker_info()
-                                    discoverlist.append(player)
-                                    self.log.info('Added manual player: %s %s' % (player.player_name, playername))
-                                except requests.exceptions.ConnectionError:
-                                    self.log.error('Error getting info from speaker - removed from discovery: %s' % playername)
-                                except:
-                                    self.log.error('Error getting info from speaker - removed from discovery: %s' % playername, exc_info=True)
+                                spinfo=player.get_speaker_info()
+                                discoverlist.append(player)
+                                self.log.info('Added manual player: %s %s' % (player.player_name, playername))
+                            except requests.exceptions.ConnectionError:
+                                self.log.error('Error getting info from speaker - removed from discovery: %s' % playername)
                             except:
-                                self.log.error('Error discovering Sonos device: %s' % playername, exc_info=True)
+                                self.log.error('Error getting info from speaker - removed from discovery: %s' % playername, exc_info=True)
+                        except:
+                            self.log.error('Error discovering Sonos device: %s' % playername, exc_info=True)
                             
                 if discoverlist==None:
                     self.log.error('Discover: No sonos devices detected')
@@ -546,12 +630,24 @@ class sonos(sofabase):
                                         q=await self.dataset.ingest(list(ginfo['members']), overwriteLevel="/player/%s/group/members" % player.uid )
                                         #ginfo=await self.getGroupInfo(device.service.soco)
                                         #q=await self.dataset.ingest(list(ginfo['members']), overwriteLevel="/player/%s/group/members" % device.service.soco.uid )
-                                self.log.info('Update from %s %s %s' % (device.service.soco.uid, device.service.service_id, update) )
-                                q=await self.dataset.ingest({'player': { device.service.soco.uid : { device.service.service_id: update }}})
+                                    try:
+                                        if 'zone_group_state' in update:
+                                            #self.log.info('.. ZoneGroupTopology update, overwriting previous data: %s ' % update)
+                                            short_update=update['zone_group_state']['ZoneGroupState']['ZoneGroups']['ZoneGroup']
+                                            #q=await self.dataset.ingest(update, overwriteLevel="/player/%s/ZoneGroupTopology" % device.service.soco.uid )
+                                            q=await self.dataset.ingest(short_update, overwriteLevel="/player/%s/ZoneGroupTopology/zone_group_state/ZoneGroupState/ZoneGroups/ZoneGroup'" % device.service.soco.uid )
+                                        else:
+                                            self.log.debug('.. ignoring ZoneGroupTopology update (no zone_group_state): %s ' % update)
+                                    except:
+                                        self.log.error('.. error with ZGT update', exc_info=True)
+                                else:
+                                    self.log.debug('.. update from %s %s %s' % (device.service.soco.uid, device.service.service_id, update) )
+                                    q=await self.dataset.ingest({'player': { device.service.soco.uid : { device.service.service_id: update }}})
 
                         else:
                             self.log.info("Subscription ended: %s" % device.__dict__)
                             self.subscriptions.remove(device)
+                            
                     #time.sleep(self.polltime)
                     await asyncio.sleep(self.polltime)
                 except:
@@ -591,7 +687,7 @@ class sonos(sofabase):
                 self.log.error('Error unpacking event: %s' % event, exc_info=True)
 
 
-        def sonosGetSonosFavorites(self, player=None):
+        async def sonosGetSonosFavorites(self, player=None):
 
             #{'type': 'instantPlay', 'title': 'A fantastic raygun', 'description': 'Amazon Music Playlist', 'parent_id': 'FV:2', 'item_id': 'FV:2/27', 'album_art_uri': 'https://s3.amazonaws.com/redbird-icons/blue_icon_playlists-80x80.png', 'desc': None, 'favorite_nr': '0', 'resource_meta_data': '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="1006206clibrary%2fplaylists%2f56de4623-3f02-4dc8-8d62-3a580d5325eb%2f%23library_playlist" parentID="10082064library%2fplaylists%2f%23library_playlists" restricted="true"><dc:title>A fantastic raygun</dc:title><upnp:class>object.container.playlistContainer</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON51463_X_#Svc51463-0-Token</desc></item></DIDL-Lite>', 'resources': [<DidlResource 'x-rincon-cpcontainer:1006206clibrary%2fplaylists%2f56de4623-3f02-4dc8-8d62-3a580d5325eb%2f%23library_playlist' at 0x748733f0>], 'restricted': False}
             try:
@@ -613,8 +709,9 @@ class sonos(sofabase):
                         newfav['uri']=''
                     favorites.append(newfav)
                 favorites=sorted(favorites, key=itemgetter('title')) 
-                self.dataset.listIngest('favorites',favorites)
-                
+                self.log.info('favs: %s' % favorites)
+                #self.dataset.listIngest('favorites',favorites)
+                await self.dataset.ingest({"favorite":favorites})
                 # not sure why this line is here. causes errors, probably just left over
                 #self.sonosQuery()
             except:
@@ -699,7 +796,6 @@ class sonos(sofabase):
 
                 
         async def addSmartDevice(self, path):
-            
             try:
                 if path.split("/")[1]=="player":
                     deviceid=path.split("/")[2]
@@ -715,12 +811,25 @@ class sonos(sofabase):
                             device.InputController=sonos.InputController(device=device, inputs=self.getInputList())
                             device.EndpointHealth=sonos.EndpointHealth(device=device)
                             device.MusicController=sonos.MusicController(device=device)
+                            # This is not supported due to changes around the way security is implemented on sonos
+                            #device.FavoriteController=sonos.FavoriteController('Favorite', device=device, 
+                            #    supportedModes=self.getFavoriteList())
                             device.SpeakerController=sonos.SpeakerController(device=device)
                             return self.dataset.newaddDevice(device)
                 return None
             except:
                 self.log.error('Error defining smart device', exc_info=True)
                 return None
+
+        def getFavoriteList(self):
+            try:
+                favs={}
+                for fav in self.dataset.nativeDevices['favorite']:
+                    favs[fav['title']]=fav['resources']['uri']
+
+            except:
+                self.log.error('!! error parsing favorites from dataset', exc_info=True)
+            return favs
 
         def getPlayer(self, device): 
             try:
@@ -834,7 +943,7 @@ class sonos(sofabase):
                         result=await response.read()
                         if result:
                             self.artcache[path]={'url':url, 'album': album, 'image':result}
-                            #self.log.info('Replaced artcache %s' % url)
+                            #self.log.info('artcache %s' % self.artcache.keys())
                             return result            
             except concurrent.futures._base.CancelledError:
                 self.log.error('.. Attempt to get art from sonos device cancelled for %s ' % (path))
