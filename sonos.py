@@ -53,10 +53,13 @@ class sonos(sofabase):
         def input(self):
             try:
                 player=self.adapter.getPlayer(self.device)
+                if player==None or player.group==None:
+                    self.log.warning('.! warning - InputController.input could not get a player for %s' % self.device.endpointId)
+                    return ""
                 #return "sonos:player:%s" % player.group.coordinator.uid
                 return player.group.coordinator.player_name
             except:
-                self.log.error('!! error getting input (coordinator) for %s' % self.device, exc_info=True)
+                self.log.error('!! error getting input (coordinator) for %s' % (self.device.endpointId, self.device), exc_info=True)
             return ""
 
         async def SelectInput(self, payload, correlationToken=''):
@@ -90,6 +93,7 @@ class sonos(sofabase):
 
         async def SetVolume(self, payload, correlationToken=''):
             try:
+                self.log.info('-> setting volume on %s to %s' % (self.device, int(payload['volume'])))
                 player=self.adapter.getPlayer(self.device)
                 player.volume=int(payload['volume'])
                 return self.device.Response(correlationToken)
@@ -278,7 +282,8 @@ class sonos(sofabase):
                 members=[]
                 player=self.adapter.getPlayer(self.device)
                 for member in self.nativeObject['group']['members']:
-                    if member!=player.uid:
+                    endpointId="sonos:player:%s" % member
+                    if member!=player.uid and endpointId in self.adapter.dataset.localDevices:
                         members.append("sonos:player:%s" % member)
                 return members
 
@@ -300,6 +305,7 @@ class sonos(sofabase):
         async def Play(self, correlationToken=''):
             try:
                 player=await self.adapter.getPlayerOrCoordinator(self.device)
+                #player=await self.adapter.getPlayerOrCoordinator(self.device)
                 if 'Play' in await self.adapter.getPlayerActions(player):
                     player.play()
                 return self.device.Response(correlationToken)
@@ -324,6 +330,7 @@ class sonos(sofabase):
         async def Pause(self, correlationToken=''):
             try:
                 player=await self.adapter.getPlayerOrCoordinator(self.device)
+                #player=await self.adapter.getPlayerOrCoordinator(self.device)
                 if 'Pause' in await self.adapter.getPlayerActions(player):
                     player.pause()
                 return self.device.Response(correlationToken)
@@ -336,6 +343,7 @@ class sonos(sofabase):
                 
         async def Stop(self, correlationToken=''):
             try:
+                #player=await self.adapter.getPlayerOrCoordinator(self.device)
                 player=await self.adapter.getPlayerOrCoordinator(self.device)
                 #self.log.debug('.. Preparing to send stop to %s with available actions %s' % (self.device, self.adapter.getPlayerActions(player)))
                 if 'Stop' in await self.adapter.getPlayerActions(player):
@@ -351,6 +359,7 @@ class sonos(sofabase):
         async def Skip(self, correlationToken=''):
             try:
                 player=await self.adapter.getPlayerOrCoordinator(self.device)
+                #player=await self.adapter.getPlayerOrCoordinator(self.device)
                 if 'Next' in await self.adapter.getPlayerActions(player):
                     player.next()
                 return self.device.Response(correlationToken)
@@ -363,7 +372,7 @@ class sonos(sofabase):
                 
         async def Previous(self, correlationToken=''):
             try:
-                player=self.adapter.getCoordinatorPlayer(self.device)
+                player=await self.adapter.getPlayerOrCoordinator(self.device)
                 if 'Previous' in await self.adapter.getPlayerActions(player):
                     player.previous()
                 return self.device.Response(correlationToken)
@@ -799,12 +808,13 @@ class sonos(sofabase):
             try:
                 if path.split("/")[1]=="player":
                     deviceid=path.split("/")[2]
+                    endpointId="%s:%s:%s" % ("sonos","player", path.split("/")[2])
                     nativeObject=self.dataset.nativeDevices['player'][deviceid]
                     if 'name' not in nativeObject:
                         self.log.error('No name in %s %s' % (deviceid, nativeObject))
                         return None
                         
-                    if nativeObject['name'] not in self.dataset.localDevices:
+                    if endpointId not in self.dataset.localDevices:
                         if 'RenderingControl' in nativeObject:
                             #if 'ZoneGroupTopology' in nativeObject:
                             device=devices.alexaDevice('sonos/player/%s' % deviceid, nativeObject['name'], displayCategories=["SPEAKER"], adapter=self)
@@ -815,7 +825,7 @@ class sonos(sofabase):
                             #device.FavoriteController=sonos.FavoriteController('Favorite', device=device, 
                             #    supportedModes=self.getFavoriteList())
                             device.SpeakerController=sonos.SpeakerController(device=device)
-                            return self.dataset.newaddDevice(device)
+                            return self.dataset.add_device(device)
                 return None
             except:
                 self.log.error('Error defining smart device', exc_info=True)
@@ -836,6 +846,7 @@ class sonos(sofabase):
                 for player in self.players:
                     if 'sonos:player:%s' % player.uid==device.endpointId:
                         return player
+                self.log.warning('.! warning - did not find player for %s in %s' % (device.endpointId, self.players))
                 return None
             except:
                 self.log.error('Error getting player', exc_info=True)
@@ -875,7 +886,12 @@ class sonos(sofabase):
                     
                 for player in self.players:
                     if 'sonos:player:%s' % player.uid==coord:
-                        return player
+                        selected_player=player
+                        if selected_player.uid!=selected_player.group.coordinator.uid:
+                            for player in self.players:
+                                if player.uid==selected_player.group.coordinator.uid:
+                                    return player
+                        return selected_player
                         
                 self.log.info('Could not find device: %s' % coord)
             except soco.exceptions.SoCoSlaveException:
@@ -892,6 +908,8 @@ class sonos(sofabase):
             
         async def getPlayerActions(self, player):
             try:
+                #self.log.info("player: %s" % player)
+                #self.log.info("actions: %s" % player.avTransport.GetCurrentTransportActions([('InstanceID', 0)]))
                 return player.avTransport.GetCurrentTransportActions([('InstanceID', 0)])['Actions'].split(', ')
             except:
                 self.log.error('Could not get available actions for %s' % player.player_name, exc_info=True)
@@ -908,9 +926,14 @@ class sonos(sofabase):
         def getCoordinator(self, device):
             try:
                 player=self.getPlayer(device)
+                if player==None:
+                    return None
+                if player.group==None:
+                    return None
                 return self.dataset.nativeDevices['player'][player.group.coordinator.uid]
             except:
                 self.log.error('Error getting coordinator', exc_info=True)
+            return None
            
             
         async def virtualThumbnail(self, path, client=None):
@@ -945,8 +968,12 @@ class sonos(sofabase):
                             self.artcache[path]={'url':url, 'album': album, 'image':result}
                             #self.log.info('artcache %s' % self.artcache.keys())
                             return result            
+
+            except concurrent.futures._base.TimeoutError:
+                self.log.error('.! Attempt to get art from sonos device timed out for %s ' % (path))
+
             except concurrent.futures._base.CancelledError:
-                self.log.error('.. Attempt to get art from sonos device cancelled for %s ' % (path))
+                self.log.error('.! Attempt to get art from sonos device cancelled for %s ' % (path))
                     #self.connect_needed=True               
             except:
                 self.log.error('Couldnt get art for %s' % path, exc_info=True)
