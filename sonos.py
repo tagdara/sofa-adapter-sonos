@@ -936,7 +936,7 @@ class sonos(sofabase):
             return None
            
             
-        async def virtualThumbnail(self, path, client=None):
+        async def virtualThumbnail(self, path, client=None, width=None, height=None):
             
             try:
                 return await self.virtualImage(path, client=client)
@@ -981,7 +981,7 @@ class sonos(sofabase):
                 
             return self.sonoslogo
 
-        async def virtualImage(self, path, client=None):
+        async def virtualImage(self, path, client=None, width=None, height=None):
             
             try:
                 if path=='darklogo':
